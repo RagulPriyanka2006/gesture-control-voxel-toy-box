@@ -35,6 +35,7 @@ const App: React.FC = () => {
   const [jsonData, setJsonData] = useState('');
   const [isAutoRotate, setIsAutoRotate] = useState(true);
   const [isGestureActive, setIsGestureActive] = useState(false);
+  const [isGridVisible, setIsGridVisible] = useState(false);
 
   // --- State for Custom Models ---
   const [currentBaseModel, setCurrentBaseModel] = useState<string>('Eagle');
@@ -124,7 +125,8 @@ const App: React.FC = () => {
       
       try {
         const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-        const model = 'gemini-3.1-pro-preview';
+        // OPTIMIZATION: Use Flash model for speed (<30s target)
+        const model = 'gemini-3-flash-preview';
         
         let systemContext = "";
         if (mode === 'morph' && engineRef.current) {
@@ -157,7 +159,7 @@ const App: React.FC = () => {
                     Task: ${prompt}
                     
                     Strict Rules:
-                    1. Use approximately 400 to 1000 voxels for maximum detail.
+                    1. Use approximately 100 to 300 voxels for EXTREME SPEED.
                     2. The model must be centered at x=0, z=0.
                     3. The bottom of the model must be at y=0 or slightly higher.
                     4. Ensure the structure is physically plausible (connected).
@@ -285,6 +287,14 @@ const App: React.FC = () => {
       }
   }
 
+  const handleToggleGrid = () => {
+      const newState = !isGridVisible;
+      setIsGridVisible(newState);
+      if (engineRef.current) {
+          engineRef.current.setGridVisible(newState);
+      }
+  }
+
   const handleHandMove = (x: number, y: number, isFist: boolean) => {
       if (engineRef.current) {
           engineRef.current.setHandPosition(x, y, isFist);
@@ -329,7 +339,8 @@ const App: React.FC = () => {
 
     try {
         const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-        const model = 'gemini-3.1-pro-preview';
+        // OPTIMIZATION: Use Flash model for speed (<30s target)
+        const model = 'gemini-3-flash-preview';
         
         let systemContext = "";
         if (promptMode === 'morph' && engineRef.current) {
@@ -374,7 +385,7 @@ const App: React.FC = () => {
                     ${imageBase64 ? 'REFERENCE IMAGE PROVIDED: You MUST analyze the attached image and recreate it as a 3D voxel model. Capture the pose, colors, and proportions exactly.' : ''}
                     
                     Strict Rules:
-                    1. Use approximately 300 to 1000 voxels for maximum detail.
+                    1. Use approximately 100 to 300 voxels for EXTREME SPEED.
                     2. The model must be centered at x=0, z=0.
                     3. The bottom of the model must be at y=0 or slightly higher.
                     4. Ensure the structure is physically plausible (connected).
@@ -481,7 +492,9 @@ const App: React.FC = () => {
         onToggleRotation={handleToggleRotation}
         onToggleInfo={() => setShowWelcome(!showWelcome)}
         onToggleGesture={() => setIsGestureActive(!isGestureActive)}
+        onToggleGrid={handleToggleGrid}
         isGestureActive={isGestureActive}
+        isGridVisible={isGridVisible}
       />
 
       <GestureController 

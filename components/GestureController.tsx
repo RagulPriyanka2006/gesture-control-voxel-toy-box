@@ -25,8 +25,9 @@ export const GestureController: React.FC<GestureControllerProps> = ({ onGesture,
   const lastGesture = useRef<string>('None');
   const gestureStartTime = useRef<number>(0);
   const lastPalmPos = useRef<{x: number, y: number, z: number} | null>(null);
+  const velocityHistory = useRef<{x: number, y: number}[]>([]);
   const cooldown = useRef<number>(0);
-  const twoHandsStartTime = useRef<number | null>(null);
+  const twoHandsFrameCount = useRef<number>(0); // Counter for stable 2-hand detection
 
   const onGestureRef = useRef(onGesture);
   const onHandMoveRef = useRef(onHandMove);
@@ -86,52 +87,34 @@ export const GestureController: React.FC<GestureControllerProps> = ({ onGesture,
                 drawLandmarks(canvasCtx, landmarks, { color: '#FF0000', lineWidth: 1 });
             }
 
-            // --- PRIORITY GESTURE: REBUILD (Two Hands Visible & Steady) ---
+            // --- PRIORITY GESTURE: REBUILD (Two Hands Visible) ---
             if (results.multiHandLandmarks.length === 2) {
-                // Check for "Clap" (Smash) vs "Praying" (Rebuild)
-                // Clap is fast approach. Praying is steady holding.
-                
-                const hand1 = results.multiHandLandmarks[0];
-                const hand2 = results.multiHandLandmarks[1];
-                const h1Wrist = hand1[0];
-                const h2Wrist = hand2[0];
-                const wristDist = Math.hypot(h1Wrist.x - h2Wrist.x, h1Wrist.y - h2Wrist.y);
-                
-                // CLAP DETECTION (Smash)
-                // If hands are very close and moving fast? 
-                // Simplified: If hands are close but NOT held steady (i.e. just arrived), maybe trigger?
-                // Actually, let's keep it simple: 
-                // Rebuild = HOLD for 1.5s.
-                // Smash = Fast movement of ANY hand.
-                
-                // Rebuild Logic
-                if (twoHandsStartTime.current === null) {
-                    twoHandsStartTime.current = now;
-                } else if (now - twoHandsStartTime.current > 1500) { // Increased to 1.5s for safety
+                // User Request: "rebuild = only when am showing both hands"
+                // FIX: "rebuild is automically rebuilded without showing two hands"
+                // We now require 2 hands to be detected for multiple consecutive frames (stability check)
+                twoHandsFrameCount.current++;
+
+                if (twoHandsFrameCount.current > 10) { // Approx 0.3-0.5s of stable detection
                     if (now > cooldown.current) {
                         onGestureRef.current('reset');
-                        setTriggerAction('MAGIC REBUILD! ✨');
+                        setTriggerAction('REBUILDING!');
                         cooldown.current = now + 2000;
-                        twoHandsStartTime.current = null;
+                        twoHandsFrameCount.current = 0; // Reset after trigger
                     }
+                    setDetectedGesture('🙌 Rebuild Detected');
+                } else {
+                     setDetectedGesture('🙌 Hold for Rebuild...');
                 }
                 
-                const progress = twoHandsStartTime.current ? Math.min(1, (now - twoHandsStartTime.current) / 1500) : 0;
-                setDetectedGesture(`🙌 Hold to Fix! ${Math.round(progress * 100)}%`);
-                
-                // Allow smash processing even with 2 hands (e.g. double slap)
-                // But return if rebuilding is imminent
-                if (progress > 0.8) {
-                    canvasCtx.restore();
-                    return;
-                }
+                canvasCtx.restore();
+                return; // Stop processing other gestures
             } else {
-                twoHandsStartTime.current = null;
+                twoHandsFrameCount.current = 0; // Reset if not 2 hands
             }
 
-            // --- SINGLE HAND GESTURES (Smash/Swipe) ---
+            // --- SINGLE HAND GESTURES (Shake/Swipe) ---
             const landmarks = results.multiHandLandmarks[0];
-            const palm = landmarks[0]; 
+            const palm = landmarks[0]; // Wrist/Palm base
             const _isFist = isFist(landmarks);
 
             // Continuous Hand Tracking
@@ -147,19 +130,61 @@ export const GestureController: React.FC<GestureControllerProps> = ({ onGesture,
                 return;
             }
 
-            setDetectedGesture(_isFist ? '✊ Fist' : '✋ Hand');
+            // Continuous State Update
+            setDetectedGesture(_isFist ? '✊ Fist' : '✋ Open');
 
-            // --- SMASH LOGIC: ANY Fast Movement (Punch or Slap) ---
+            // --- SMASH LOGIC: Punch or Fast Swing ---
+            // User Request: "smash when was punch , and the punch was not easy it complex"
             if (lastPalmPos.current) {
                 const dx = palm.x - lastPalmPos.current.x;
                 const dy = palm.y - lastPalmPos.current.y;
-                const speed = Math.hypot(dx, dy);
+                const dz = palm.z - lastPalmPos.current.z; // Depth change (negative is closer to camera)
                 
-                // Kid-friendly threshold: 0.2 is easy to hit with a quick wave/slap
-                if (speed > 0.2) {
+                // Add to history
+                velocityHistory.current.push({x: dx, y: dy});
+                if (velocityHistory.current.length > 10) velocityHistory.current.shift();
+
+                const speed = Math.sqrt(dx*dx + dy*dy);
+
+                // SIMPLIFIED SMASH DETECTION
+                // Trigger if:
+                // 1. Punching towards screen (negative Z)
+                // 2. OR Moving very fast in any direction (Swing)
+                // AND must be a fist
+                
+                const isPunching = dz < -0.04; // Relaxed from -0.05
+                const isFastSwing = speed > 0.3; // Fast lateral movement
+                
+                if (_isFist && (isPunching || isFastSwing)) {
+                     onGestureRef.current('punch');
+                     setTriggerAction('SMASH!');
+                     cooldown.current = now + 800; // Reduced cooldown slightly
+                     velocityHistory.current = [];
+                     canvasCtx.restore();
+                     return;
+                }
+
+                // 3. SHAKE DETECTION (Backup)
+                // Analyze Shake: high velocity with frequent direction reversals
+                let reversalsX = 0;
+                let reversalsY = 0;
+                let totalMotion = 0;
+
+                for (let i = 1; i < velocityHistory.current.length; i++) {
+                    const v = velocityHistory.current[i];
+                    const prev = velocityHistory.current[i-1];
+                    
+                    if (Math.abs(v.x) > 0.05 && Math.abs(prev.x) > 0.05 && Math.sign(v.x) !== Math.sign(prev.x)) reversalsX++;
+                    if (Math.abs(v.y) > 0.05 && Math.abs(prev.y) > 0.05 && Math.sign(v.y) !== Math.sign(prev.y)) reversalsY++;
+                    
+                    totalMotion += Math.abs(v.x) + Math.abs(v.y);
+                }
+
+                if ((reversalsX >= 2 || reversalsY >= 2) && totalMotion > 0.45) {
                     onGestureRef.current('punch');
-                    setTriggerAction('POW! 💥'); // Fun text
-                    cooldown.current = now + 600; // Faster cooldown for fun
+                    setTriggerAction('SMASH!');
+                    cooldown.current = now + 1000;
+                    velocityHistory.current = [];
                 }
             }
 
@@ -171,7 +196,8 @@ export const GestureController: React.FC<GestureControllerProps> = ({ onGesture,
                 const velocityX = dx; 
                 const velocityY = dy; 
                 
-                const SWIPE_THRESHOLD = 0.15;
+                // Increased swipe threshold to 0.2 to prevent "spilling" (accidental swipes)
+                const SWIPE_THRESHOLD = 0.2;
                 
                 if (Math.abs(velocityX) > Math.abs(velocityY)) {
                     if (Math.abs(velocityX) > SWIPE_THRESHOLD) {
@@ -199,7 +225,7 @@ export const GestureController: React.FC<GestureControllerProps> = ({ onGesture,
 
         } else {
             setDetectedGesture('No Hand Detected');
-            twoHandsStartTime.current = null;
+            velocityHistory.current = []; // Reset history if hand lost
         }
         
         canvasCtx.restore();
@@ -267,63 +293,80 @@ export const GestureController: React.FC<GestureControllerProps> = ({ onGesture,
         {/* Full Screen Feedback Overlay */}
         {triggerAction && (
             <div className="fixed inset-0 z-[100] flex items-center justify-center pointer-events-none">
-                <div className="bg-white/90 text-indigo-600 px-12 py-6 rounded-3xl font-black text-5xl shadow-2xl animate-in zoom-in duration-150 border-8 border-indigo-200 transform rotate-[-5deg] backdrop-blur-sm">
+                <div className="bg-white text-transparent bg-clip-text bg-gradient-to-br from-indigo-600 to-purple-600 px-16 py-8 rounded-[3rem] font-black text-8xl shadow-[0_20px_60px_-15px_rgba(0,0,0,0.3)] animate-in zoom-in duration-200 border-[12px] border-white transform -rotate-6 backdrop-blur-md ring-8 ring-black/5">
                     {triggerAction}
                 </div>
             </div>
         )}
 
-        <div className="fixed bottom-4 right-4 z-50 flex flex-col items-end animate-in slide-in-from-bottom-10 fade-in duration-300">
-        <div className="relative rounded-2xl overflow-hidden shadow-2xl border-4 border-white bg-black w-64 h-48">
-            {loading && (
-                <div className="absolute inset-0 flex items-center justify-center text-white font-bold bg-slate-800">
-                    Starting Camera...
+        <div className="fixed bottom-6 right-6 z-50 flex flex-col items-end animate-in slide-in-from-bottom-10 fade-in duration-500">
+            <div className="relative rounded-[2rem] overflow-hidden shadow-2xl border-[6px] border-white bg-slate-900 w-72 h-52 ring-4 ring-black/5">
+                {loading && (
+                    <div className="absolute inset-0 flex items-center justify-center text-white font-bold bg-slate-800 animate-pulse">
+                        Starting Camera...
+                    </div>
+                )}
+                {cameraError && (
+                    <div className="absolute inset-0 flex items-center justify-center text-rose-400 font-bold bg-slate-900 p-6 text-center">
+                        Camera access denied or unavailable.
+                    </div>
+                )}
+                
+                <Webcam
+                    ref={webcamRef}
+                    audio={false}
+                    width={320}
+                    height={240}
+                    className="absolute inset-0 w-full h-full object-cover opacity-40" // Show slightly faded video in box
+                    mirrored={true}
+                    screenshotFormat="image/jpeg"
+                    screenshotQuality={1}
+                    videoConstraints={{ facingMode: "user" }}
+                    disablePictureInPicture={true}
+                    forceScreenshotSourceSize={true}
+                    imageSmoothing={true}
+                    onUserMedia={() => {}}
+                    onUserMediaError={() => {}}
+                />
+                <canvas
+                    ref={canvasRef}
+                    className="absolute inset-0 w-full h-full object-cover transform -scale-x-100" // Mirror canvas to match webcam mirror
+                />
+                
+                {/* Overlay UI */}
+                <div className="absolute top-3 left-3 flex flex-col gap-2 items-start">
+                    <div className={`text-xs font-black px-3 py-1.5 rounded-full backdrop-blur-md transition-all shadow-sm border border-white/20 ${detectedGesture.includes('Fist') ? 'bg-rose-500 text-white animate-pulse' : 'bg-black/60 text-white'}`}>
+                        {detectedGesture}
+                    </div>
                 </div>
-            )}
-            {cameraError && (
-                <div className="absolute inset-0 flex items-center justify-center text-rose-400 font-bold bg-slate-900 p-4 text-center">
-                    Camera access denied or unavailable.
-                </div>
-            )}
-            
-            <Webcam
-            ref={webcamRef}
-            audio={false}
-            width={320}
-            height={240}
-            className="absolute inset-0 w-full h-full object-cover opacity-0" // Hide raw video, show canvas
-            mirrored={true}
-            />
-            <canvas
-            ref={canvasRef}
-            className="absolute inset-0 w-full h-full object-cover transform -scale-x-100" // Mirror canvas to match webcam mirror
-            />
-            
-            {/* Overlay UI */}
-            <div className="absolute top-2 left-2 flex flex-col gap-1 items-start">
-                <div className={`text-xs font-bold px-2 py-1 rounded-md backdrop-blur-sm transition-colors ${detectedGesture.includes('Fist') ? 'bg-rose-500/80 text-white' : 'bg-black/60 text-white'}`}>
-                    {detectedGesture}
-                </div>
+                
+                <button 
+                    onClick={onClose}
+                    className="absolute top-3 right-3 p-2 bg-black/40 hover:bg-rose-500 rounded-full text-white transition-all backdrop-blur-sm border border-white/20 hover:scale-110"
+                >
+                    <X size={16} strokeWidth={3} />
+                </button>
             </div>
             
-            <button 
-                onClick={onClose}
-                className="absolute top-2 right-2 p-1 bg-white/20 hover:bg-white/40 rounded-full text-white transition-colors"
-            >
-                <X size={16} />
-            </button>
-        </div>
-        
-        <div className="mt-2 bg-white/90 backdrop-blur-md p-3 rounded-xl shadow-lg text-xs font-medium text-slate-600 max-w-[256px]">
-            <div className="flex items-center gap-2 mb-1 text-indigo-600 font-bold">
-                <Hand size={14} /> Gesture Controls
+            <div className="mt-4 bg-white/90 backdrop-blur-xl p-5 rounded-[2rem] shadow-[0_10px_30px_-10px_rgba(0,0,0,0.1)] text-xs font-medium text-slate-600 max-w-[280px] border-2 border-white ring-1 ring-black/5">
+                <div className="flex items-center gap-2 mb-3 text-indigo-600 font-black uppercase tracking-wider text-[10px]">
+                    <Hand size={14} strokeWidth={3} /> Gesture Controls
+                </div>
+                <ul className="space-y-2">
+                    <li className="flex items-center justify-between bg-slate-50 p-2 rounded-xl border border-slate-100">
+                        <span className="font-bold text-slate-800">Punch / Swing</span> 
+                        <span className="text-[10px] font-black bg-rose-100 text-rose-600 px-2 py-0.5 rounded-full">SMASH</span>
+                    </li>
+                    <li className="flex items-center justify-between bg-slate-50 p-2 rounded-xl border border-slate-100">
+                        <span className="font-bold text-slate-800">Swipe</span>
+                        <span className="text-[10px] font-black bg-sky-100 text-sky-600 px-2 py-0.5 rounded-full">SCATTER</span>
+                    </li>
+                    <li className="flex items-center justify-between bg-slate-50 p-2 rounded-xl border border-slate-100">
+                        <span className="font-bold text-slate-800">Two Hands</span>
+                        <span className="text-[10px] font-black bg-emerald-100 text-emerald-600 px-2 py-0.5 rounded-full">REBUILD</span>
+                    </li>
+                </ul>
             </div>
-            <ul className="space-y-1 list-disc list-inside">
-                <li><span className="font-bold text-slate-800">Fast Punch:</span> Smash</li>
-                <li><span className="font-bold text-slate-800">Swipe:</span> Scatter</li>
-                <li><span className="font-bold text-slate-800">Show 2 Hands:</span> Hold to Rebuild</li>
-            </ul>
-        </div>
         </div>
     </>
   );

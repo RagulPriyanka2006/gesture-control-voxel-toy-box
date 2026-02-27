@@ -6,10 +6,9 @@
 
 
 import * as THREE from 'three';
-import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { AppState, SimulationVoxel, RebuildTarget, VoxelData } from '../types';
 import { CONFIG, COLORS } from '../utils/voxelConstants';
-import { soundEngine } from './SoundEngine';
 
 export class VoxelEngine {
   private container: HTMLElement;
@@ -19,6 +18,7 @@ export class VoxelEngine {
   private controls: OrbitControls;
   private instanceMesh: THREE.InstancedMesh | null = null;
   private dummy = new THREE.Object3D();
+  private gridHelper: THREE.GridHelper;
   
   private voxels: SimulationVoxel[] = [];
   private rebuildTargets: RebuildTarget[] = [];
@@ -49,13 +49,15 @@ export class VoxelEngine {
     this.scene.fog = new THREE.Fog(CONFIG.BG_COLOR, 60, 140); // Reduced haze
 
     this.camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 1000);
-    // Zoomed in start position
-    this.camera.position.set(15, 15, 30);
+    // Zoomed in start position - Closer to reduce empty space
+    this.camera.position.set(10, 10, 20);
 
     this.renderer = new THREE.WebGLRenderer({ antialias: true });
     this.renderer.setSize(window.innerWidth, window.innerHeight);
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    this.renderer.toneMappingExposure = 1.1;
     container.appendChild(this.renderer.domElement);
 
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
@@ -65,14 +67,17 @@ export class VoxelEngine {
     this.controls.target.set(0, 5, 0);
 
     // Lights
-    const ambientLight = new THREE.AmbientLight(0xffffff, 0.4);
+    // 1. Ambient - Lower intensity for better contrast
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.3);
     this.scene.add(ambientLight);
 
-    const hemiLight = new THREE.HemisphereLight(0xffffff, 0x444444, 0.6);
+    // 2. Hemisphere - Soft fill
+    const hemiLight = new THREE.HemisphereLight(0xffffff, 0x222222, 0.5);
     hemiLight.position.set(0, 200, 0);
     this.scene.add(hemiLight);
 
-    const dirLight = new THREE.DirectionalLight(0xffffff, 1.5);
+    // 3. Key Light (Directional) - Stronger, slightly warmer
+    const dirLight = new THREE.DirectionalLight(0xfffaed, 2.0);
     dirLight.position.set(50, 80, 30);
     dirLight.castShadow = true;
     dirLight.shadow.mapSize.width = 4096;
@@ -85,6 +90,13 @@ export class VoxelEngine {
     dirLight.shadow.radius = 2; // Soft shadows
     this.scene.add(dirLight);
 
+    // 4. Rim Light (Spot) - Cool backlight to separate model from background
+    const rimLight = new THREE.SpotLight(0xddeeff, 3.0);
+    rimLight.position.set(-40, 50, -40);
+    rimLight.lookAt(0, 0, 0);
+    rimLight.penumbra = 1;
+    this.scene.add(rimLight);
+
     // Floor
     const planeMat = new THREE.MeshStandardMaterial({ 
         color: 0xe2e8f0, 
@@ -96,6 +108,12 @@ export class VoxelEngine {
     floor.position.y = CONFIG.FLOOR_Y;
     floor.receiveShadow = true;
     this.scene.add(floor);
+
+    // Grid Helper (Optional Overlay)
+    this.gridHelper = new THREE.GridHelper(100, 100, 0x888888, 0xcccccc);
+    this.gridHelper.position.y = CONFIG.FLOOR_Y + 0.05; // Slightly above floor
+    this.gridHelper.visible = false; // Hidden by default
+    this.scene.add(this.gridHelper);
 
     this.animate = this.animate.bind(this);
     this.animate();
@@ -141,12 +159,12 @@ export class VoxelEngine {
 
     // Plastic-like material with texture
     const material = new THREE.MeshStandardMaterial({ 
-        roughness: 0.6, 
+        roughness: 0.5, // Slightly smoother for better highlights
         metalness: 0.1,
         map: texture,
         roughnessMap: texture,
         bumpMap: texture,
-        bumpScale: 0.02,
+        bumpScale: 0.04, // Increased bump for more pop
         flatShading: false 
     });
     
@@ -187,9 +205,9 @@ export class VoxelEngine {
       this.controls.target.set(centerX, centerY, centerZ);
 
       // Zoom in close ("Very Big")
-      // Distance factor 1.5 ensures it fills the screen but stays within frame
-      // Reduced from typical ~2.5 to 1.5 to make it look huge
-      const distance = Math.max(maxDim * 1.5, 15); 
+      // Distance factor 1.0 ensures it fills the screen but stays within frame
+      // Reduced from typical ~2.5 to 1.0 to make it look huge and reduce empty space
+      const distance = Math.max(maxDim * 1.0, 10); 
 
       // Maintain a nice viewing angle
       const direction = new THREE.Vector3(0.5, 0.5, 1).normalize(); 
@@ -348,8 +366,6 @@ export class VoxelEngine {
             
             // Trigger screen shake
             this.shakeIntensity = 2.5;
-            soundEngine.playSmash();
-            soundEngine.playClatter();
         }
         
         v.vx = vx;
@@ -405,7 +421,7 @@ export class VoxelEngine {
             const h = Math.max(0, (target.y - CONFIG.FLOOR_Y) / 15);
             mappings[available[bestIdx].index] = {
                 x: target.x, y: target.y, z: target.z,
-                delay: h * 800
+                delay: h * 300 // Faster rebuild (was 800)
             };
         }
     });
@@ -424,7 +440,6 @@ export class VoxelEngine {
     this.rebuildStartTime = Date.now();
     this.state = AppState.REBUILDING;
     this.onStateChange(this.state);
-    soundEngine.playRebuild();
   }
 
   private updatePhysics() {
@@ -523,7 +538,7 @@ export class VoxelEngine {
                 return;
             }
 
-            const speed = 0.12;
+            const speed = 0.25; // Faster flight (was 0.12)
             v.x += (t.x - v.x) * speed;
             v.y += (t.y - v.y) * speed;
             v.z += (t.z - v.z) * speed;
@@ -593,6 +608,12 @@ export class VoxelEngine {
     if (this.controls) {
         this.controls.autoRotate = enabled;
     }
+  }
+
+  public setGridVisible(visible: boolean) {
+      if (this.gridHelper) {
+          this.gridHelper.visible = visible;
+      }
   }
 
   public getJsonData(): string {
